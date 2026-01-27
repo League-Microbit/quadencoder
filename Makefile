@@ -6,5 +6,5 @@ build:
 deploy:
 	pxt deploy
 
-test:
-	pxt test
+test: 
+	pxt build && pxt test
