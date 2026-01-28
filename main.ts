@@ -61,6 +61,265 @@ enum ChannelNum {
     M4 = 4
 }
 
+// ============================================================================
+// Position Classes for Target Specification
+// ============================================================================
+
+/**
+ * Base class for position specifications
+ */
+class Position {
+    protected _value: number
+    protected _isRelative: boolean
+    
+    constructor(value: number, isRelative: boolean) {
+        this._value = value
+        this._isRelative = isRelative
+    }
+    
+    /**
+     * Convert position to absolute encoder counts
+     * @param currentPosition Current encoder position in counts
+     * @param pulsesPerRevolution Total encoder pulses per full revolution
+     */
+    toEncoderCounts(currentPosition: number, pulsesPerRevolution: number): number {
+        return 0  // Override in subclasses
+    }
+    
+    isRelative(): boolean {
+        return this._isRelative
+    }
+}
+
+/**
+ * Position specified in encoder counts
+ */
+class EncoderCountsPosition extends Position {
+    constructor(counts: number, isRelative: boolean = false) {
+        super(counts, isRelative)
+    }
+    
+    toEncoderCounts(currentPosition: number, pulsesPerRevolution: number): number {
+        if (this._isRelative) {
+            return currentPosition + this._value
+        }
+        return this._value
+    }
+    
+    /**
+     * Create absolute position in encoder counts
+     */
+    static absolute(counts: number): EncoderCountsPosition {
+        return new EncoderCountsPosition(counts, false)
+    }
+    
+    /**
+     * Create relative position in encoder counts
+     */
+    static relative(counts: number): EncoderCountsPosition {
+        return new EncoderCountsPosition(counts, true)
+    }
+}
+
+/**
+ * Position specified in degrees
+ */
+class DegreesPosition extends Position {
+    constructor(degrees: number, isRelative: boolean = false) {
+        super(degrees, isRelative)
+    }
+    
+    toEncoderCounts(currentPosition: number, pulsesPerRevolution: number): number {
+        // Convert degrees to encoder counts
+        // 360 degrees = pulsesPerRevolution counts
+        let counts = Math.round((this._value / 360.0) * pulsesPerRevolution)
+        
+        if (this._isRelative) {
+            return currentPosition + counts
+        }
+        return counts
+    }
+    
+    /**
+     * Create absolute position in degrees
+     */
+    static absolute(degrees: number): DegreesPosition {
+        return new DegreesPosition(degrees, false)
+    }
+    
+    /**
+     * Create relative position in degrees
+     */
+    static relative(degrees: number): DegreesPosition {
+        return new DegreesPosition(degrees, true)
+    }
+}
+
+// ============================================================================
+// PID Controller
+// ============================================================================
+
+class PIDController {
+    // PID gains
+    private _kP: number
+    private _kI: number
+    private _kD: number
+    
+    // Limits
+    private _maxAcceleration: number  // Encoder counts per second^2
+    private _maxSpeed: number         // Maximum speed limit
+    private _tolerance: number        // Position tolerance in encoder counts
+    
+    // State
+    private _target: number
+    private _integral: number
+    private _lastError: number
+    private _lastTime: number
+    private _active: boolean
+    private _currentSpeed: number
+    
+    constructor(
+        kP: number = 2.0,
+        kI: number = 0.1,
+        kD: number = 0.5,
+        maxAcceleration: number = 500,
+        maxSpeed: number = 1000,
+        tolerance: number = 10
+    ) {
+        this._kP = kP
+        this._kI = kI
+        this._kD = kD
+        this._maxAcceleration = maxAcceleration
+        this._maxSpeed = maxSpeed
+        this._tolerance = tolerance
+        
+        // Initialize state
+        this._target = 0
+        this._integral = 0
+        this._lastError = 0
+        this._lastTime = 0
+        this._active = false
+        this._currentSpeed = 0
+    }
+    
+    /**
+     * Set PID gains
+     */
+    setGains(kP: number, kI: number, kD: number): void {
+        this._kP = kP
+        this._kI = kI
+        this._kD = kD
+    }
+    
+    /**
+     * Set maximum acceleration (encoder counts per second squared)
+     */
+    setMaxAcceleration(accel: number): void {
+        this._maxAcceleration = accel
+    }
+    
+    /**
+     * Set maximum speed limit
+     */
+    setMaxSpeed(speed: number): void {
+        this._maxSpeed = speed
+    }
+    
+    /**
+     * Set position tolerance (encoder counts)
+     */
+    setTolerance(tolerance: number): void {
+        this._tolerance = tolerance
+    }
+    
+    /**
+     * Set target position and activate controller
+     */
+    setTarget(target: number): void {
+        this._target = target
+        this._integral = 0
+        this._lastError = 0
+        this._lastTime = control.millis()
+        this._active = true
+    }
+    
+    /**
+     * Check if controller is active
+     */
+    isActive(): boolean {
+        return this._active
+    }
+    
+    /**
+     * Stop the controller and reset speed
+     */
+    stop(): void {
+        this._active = false
+        this._currentSpeed = 0
+    }
+    
+    /**
+     * Update PID control loop
+     * @param currentPosition Current encoder position
+     * @returns Object with speed command and whether target is reached
+     */
+    update(currentPosition: number): { speed: number, atTarget: boolean } {
+        if (!this._active) {
+            return { speed: 0, atTarget: true }
+        }
+        
+        // Calculate error
+        let error = this._target - currentPosition
+        
+        // Check if we've reached the target
+        if (Math.abs(error) <= this._tolerance) {
+            this._active = false
+            this._currentSpeed = 0
+            return { speed: 0, atTarget: true }
+        }
+        
+        // Calculate time delta
+        let currentTime = control.millis()
+        let dt = (currentTime - this._lastTime) / 1000.0  // Convert to seconds
+        if (dt <= 0) dt = 0.01  // Prevent division by zero
+        
+        // PID calculations
+        this._integral += error * dt
+        
+        // Anti-windup: clamp integral
+        let maxIntegral = 1000
+        if (this._integral > maxIntegral) this._integral = maxIntegral
+        if (this._integral < -maxIntegral) this._integral = -maxIntegral
+        
+        let derivative = (error - this._lastError) / dt
+        
+        // Calculate desired speed from PID
+        let desiredSpeed = this._kP * error + this._kI * this._integral + this._kD * derivative
+        
+        // Apply acceleration limits
+        let maxSpeedChange = this._maxAcceleration * dt
+        let speedChange = desiredSpeed - this._currentSpeed
+        
+        if (speedChange > maxSpeedChange) {
+            speedChange = maxSpeedChange
+        } else if (speedChange < -maxSpeedChange) {
+            speedChange = -maxSpeedChange
+        }
+        
+        this._currentSpeed += speedChange
+        
+        // Apply speed limits
+        if (this._currentSpeed > this._maxSpeed) this._currentSpeed = this._maxSpeed
+        if (this._currentSpeed < -this._maxSpeed) this._currentSpeed = -this._maxSpeed
+        
+        // Update state
+        this._lastError = error
+        this._lastTime = currentTime
+        
+        return { speed: Math.round(this._currentSpeed), atTarget: false }
+    }
+}
+
 // Motor configuration presets (from docs/IIC.py set_motor_parameter)
 interface MotorConfig {
     deadZone: number
@@ -105,24 +364,66 @@ function build16BitBuffer(value: number): Buffer {
 /**
  * Build 4-byte little-endian float buffer
  * Python ref: struct.pack('<f', f)
- * Note: MakeCode doesn't have direct float packing, so we use a workaround
+ * Manual IEEE 754 float encoding since MakeCode lacks struct.pack
  */
 function buildFloatBuffer(value: number): Buffer {
-    // Convert float to IEEE 754 32-bit representation
-    // This is a simplified approach - for precise float encoding,
-    // we'd need full IEEE 754 implementation
     let buf = pins.createBuffer(4)
     
-    // For MakeCode compatibility, we'll send the float as a scaled integer
-    // and rely on the controller's firmware to interpret it correctly
-    // Scale by 100 to preserve 2 decimal places
-    let scaled = Math.round(value * 100)
+    // Handle special cases
+    if (value === 0) {
+        // Positive zero: all bytes 0x00
+        return buf
+    }
     
-    // Pack as 32-bit little-endian integer
-    buf[0] = scaled & 0xFF
-    buf[1] = (scaled >> 8) & 0xFF
-    buf[2] = (scaled >> 16) & 0xFF
-    buf[3] = (scaled >> 24) & 0xFF
+    // IEEE 754 single precision format:
+    // [sign: 1 bit][exponent: 8 bits][mantissa: 23 bits]
+    
+    let sign = 0
+    if (value < 0) {
+        sign = 1
+        value = -value
+    }
+    
+    // Calculate exponent and mantissa
+    let exponent = 0
+    let mantissa = value
+    
+    // Normalize: adjust mantissa to range [1.0, 2.0)
+    while (mantissa >= 2.0) {
+        mantissa /= 2.0
+        exponent++
+    }
+    while (mantissa < 1.0) {
+        mantissa *= 2.0
+        exponent--
+    }
+    
+    // Remove implicit leading 1 and convert to 23-bit integer
+    mantissa = (mantissa - 1.0) * 0x800000  // 2^23
+    
+    // Add bias to exponent (127 for single precision)
+    exponent += 127
+    
+    // Clamp exponent to valid range
+    if (exponent <= 0) {
+        exponent = 0
+        mantissa = 0
+    } else if (exponent >= 255) {
+        exponent = 255
+        mantissa = 0
+    }
+    
+    // Pack into 32-bit value (little-endian)
+    let mantissaInt = Math.floor(mantissa)
+    let byte0 = mantissaInt & 0xFF
+    let byte1 = (mantissaInt >> 8) & 0xFF
+    let byte2 = ((mantissaInt >> 16) & 0x7F) | ((exponent & 0x01) << 7)
+    let byte3 = ((exponent >> 1) & 0x7F) | (sign << 7)
+    
+    buf[0] = byte0
+    buf[1] = byte1
+    buf[2] = byte2
+    buf[3] = byte3
     
     return buf
 }
@@ -228,10 +529,45 @@ function parseEncoder32(highBuffer: Buffer, lowBuffer: Buffer): number {
 class MotorChannel {
     private _channelNum: number
     private _motorType: MotorType
+    private _pulsesPerRevolution: number
     
-    constructor(channelNum: number) {
+    // PID controller
+    private _pidController: PIDController
+    
+    constructor(
+        channelNum: number, 
+        motorType: MotorType, 
+        deadZone: number, 
+        reductionRatio: number, 
+        pulsesPerLine: number = 0, 
+        wheelDiameter: number = 0,
+        kP: number = 2.0,
+        kI: number = 0.1,
+        kD: number = 0.5,
+        maxAcceleration: number = 500,  // counts/s^2
+        maxSpeed: number = 1000
+    ) {
         this._channelNum = channelNum
-        this._motorType = MotorType.Motor520  // Default
+        this._motorType = motorType
+        
+        // Calculate total pulses per revolution (pulses per line * reduction ratio * 4 for quadrature)
+        this._pulsesPerRevolution = pulsesPerLine * reductionRatio * 4
+        
+        // Initialize PID controller
+        this._pidController = new PIDController(kP, kI, kD, maxAcceleration, maxSpeed)
+        
+        // Write all configuration to board
+        writeI2C(Register.MOTOR_TYPE, buildMotorTypeBuffer(motorType))
+        basic.pause(100)
+        
+        this.setDeadZone(deadZone)
+        this.setReductionRatio(reductionRatio)
+        
+        // Only set encoder params for motors with encoders (not type 4)
+        if (motorType !== MotorType.TTMotorDC && pulsesPerLine > 0) {
+            this.setPulsesPerLine(pulsesPerLine)
+            this.setWheelDiameter(wheelDiameter)
+        }
     }
     
     /**
@@ -334,6 +670,163 @@ class MotorChannel {
     getChannelNum(): number {
         return this._channelNum
     }
+    
+    /**
+     * Set PID gains
+     */
+    setPID(kP: number, kI: number, kD: number): void {
+        this._pidController.setGains(kP, kI, kD)
+    }
+    
+    /**
+     * Set maximum acceleration (encoder counts per second squared)
+     */
+    setMaxAcceleration(accel: number): void {
+        this._pidController.setMaxAcceleration(accel)
+    }
+    
+    /**
+     * Set maximum speed limit
+     */
+    setMaxSpeed(speed: number): void {
+        this._pidController.setMaxSpeed(speed)
+    }
+    
+    /**
+     * Set position tolerance for position control (encoder counts)
+     */
+    setTolerance(tolerance: number): void {
+        this._pidController.setTolerance(tolerance)
+    }
+    
+    /**
+     * Update PID control loop (call periodically for background position control)
+     * Returns true if at target position
+     */
+    updatePID(): boolean {
+        let currentPosition = this.readAccumulatedEncoder()
+        let result = this._pidController.update(currentPosition)
+        
+        if (result.speed !== 0 || !result.atTarget) {
+            this._setSpeedInternal(result.speed)
+        }
+        
+        return result.atTarget
+    }
+    
+    /**
+     * Internal method to set speed for a single motor
+     */
+    private _setSpeedInternal(speed: number): void {
+        // This is a limitation - we can only set all motors at once
+        // For now, we'll create a helper buffer and write directly
+        let speeds = [0, 0, 0, 0]
+        speeds[this._channelNum - 1] = speed
+        let buf = build4MotorBuffer(speeds[0], speeds[1], speeds[2], speeds[3])
+        writeI2C(Register.SPEED_CONTROL, buf)
+    }
+    
+    /**
+     * Move to target position (blocking)
+     * Blocks until position is reached within tolerance
+     * @param position Target position (EncoderCountsPosition or DegreesPosition)
+     * @param timeout Maximum time to wait in milliseconds (0 = no timeout)
+     */
+    moveToPosition(position: Position, timeout: number = 0): boolean {
+        // Convert position to encoder counts
+        let currentPosition = this.readAccumulatedEncoder()
+        let targetCounts = position.toEncoderCounts(currentPosition, this._pulsesPerRevolution)
+        
+        // Set target and activate PID controller
+        this._pidController.setTarget(targetCounts)
+        
+        let startTime = control.millis()
+        
+        // Run control loop until target reached or timeout
+        while (true) {
+            let atTarget = this.updatePID()
+            
+            if (atTarget) {
+                return true  // Successfully reached target
+            }
+            
+            // Check timeout
+            if (timeout > 0 && (control.millis() - startTime) >= timeout) {
+                this._pidController.stop()
+                this._setSpeedInternal(0)
+                return false  // Timeout
+            }
+            
+            basic.pause(20)  // 50Hz control loop
+        }
+    }
+    
+    /**
+     * Move to target position (non-blocking)
+     * Starts movement and returns immediately
+     * Call updatePID() periodically to continue control
+     * @param position Target position (EncoderCountsPosition or DegreesPosition)
+     */
+    moveToPositionAsync(position: Position): void {
+        // Convert position to encoder counts
+        let currentPosition = this.readAccumulatedEncoder()
+        let targetCounts = position.toEncoderCounts(currentPosition, this._pulsesPerRevolution)
+        
+        // Set target and activate PID controller
+        this._pidController.setTarget(targetCounts)
+    }
+    
+    /**
+     * Check if motor is currently moving to a position
+     */
+    isMoving(): boolean {
+        return this._pidController.isActive()
+    }
+    
+    /**
+     * Stop position control and halt motor
+     */
+    stopPositionControl(): void {
+        this._pidController.stop()
+        this._setSpeedInternal(0)
+    }
+    
+    /**
+     * Factory method to create a motor channel from a preset motor type
+     */
+    static fromPreset(channelNum: number, type: MotorType, kP: number = 2.0, kI: number = 0.1, kD: number = 0.5, maxAccel: number = 500, maxSpeed: number = 1000): MotorChannel {
+        let config = MOTOR_CONFIGS[type]
+        if (config) {
+            return new MotorChannel(
+                channelNum,
+                type,
+                config.deadZone,
+                config.reductionRatio,
+                config.pulsesPerLine,
+                config.wheelDiameter,
+                kP,
+                kI,
+                kD,
+                maxAccel,
+                maxSpeed
+            )
+        }
+        // Fallback to 520 motor if config not found
+        let defaultConfig = MOTOR_CONFIGS[1]
+        return new MotorChannel(
+            channelNum,
+            type,
+            defaultConfig.deadZone,
+            defaultConfig.reductionRatio,
+            defaultConfig.pulsesPerLine,
+            defaultConfig.wheelDiameter,
+            kP,
+            kI,
+            kD,
+            maxAccel,
+            maxSpeed
+        )
+    }
 }
 
 // ============================================================================
@@ -341,22 +834,38 @@ class MotorChannel {
 // ============================================================================
 
 class QuadEncoderBoard {
-    private channels: MotorChannel[]
+    private channels: (MotorChannel | null)[]
     
-    constructor() {
+    constructor(m1?: MotorChannel, m2?: MotorChannel, m3?: MotorChannel, m4?: MotorChannel) {
         this.channels = [
-            new MotorChannel(1),
-            new MotorChannel(2),
-            new MotorChannel(3),
-            new MotorChannel(4)
+            m1 || null,
+            m2 || null,
+            m3 || null,
+            m4 || null
         ]
+    }
+    
+    /**
+     * Register a motor channel with the board
+     */
+    registerChannel(channel: MotorChannel): void {
+        let num = channel.getChannelNum()
+        if (num >= 1 && num <= 4) {
+            this.channels[num - 1] = channel
+        }
     }
     
     /**
      * Get a specific motor channel
      */
     channel(num: ChannelNum): MotorChannel {
-        return this.channels[num - 1]
+        let ch = this.channels[num - 1]
+        if (!ch) {
+            // Create a default channel if not registered
+            ch = MotorChannel.fromPreset(num, MotorType.Motor520)
+            this.channels[num - 1] = ch
+        }
+        return ch
     }
     
     /**

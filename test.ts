@@ -3,6 +3,17 @@
 // Hardware verification tests for motor controller
 // ============================================================================
 
+// Module-level motor configuration
+// Create board with all motors configured in constructor
+// Motors 1-2: 310 motors with 20:1 reduction ratio (300 RPM)
+// Motors 3-4: 310 motors with 45:1 reduction ratio (130 RPM)
+let board = new QuadEncoderBoard(
+    new MotorChannel(1, MotorType.Motor310, 1200, 20, 13, 48.0),
+    new MotorChannel(2, MotorType.Motor310, 1200, 20, 13, 48.0),
+    new MotorChannel(3, MotorType.Motor310, 1200, 45, 13, 48.0),
+    new MotorChannel(4, MotorType.Motor310, 1200, 45, 13, 48.0)
+)
+
 /**
  * Check if the I2C board is responding
  * Returns true if board responds, false otherwise
@@ -59,40 +70,41 @@ function waitForI2CConnection(): void {
 }
 
 /**
- * Test 1: Initialize and configure Motor 1 as 310 motor
+ * Test 1: Verify motor configuration
  */
 function test_initializeMotor(): void {
-    serial.writeLine("=== Test 1: Initialize Motor ===")
+    basic.showNumber(1)
+    serial.writeLine("=== Test 1: Motor Configuration ===")
     
-    let board = getBoard()
-    let motor1 = board.channel(ChannelNum.M1)
+    serial.writeLine("Motor 1 configured as 310 motor")
+    serial.writeLine("  Settings: deadzone=1200, ratio=20, pulses=13, diameter=48mm")
+    serial.writeLine("  (Motors configured at module level)")
     
-    serial.writeLine("Configuring M1 as 310 motor...")
-    motor1.setMotorType(MotorType.Motor310)
-    
-    serial.writeLine("Motor 1 initialized")
     basic.pause(1000)
 }
 
 /**
  * Test 2: Speed ramp for Motor 1
- * Ramp: 0 -> 500 -> 1000 -> 500 -> 0
+ * Test multiple speeds to verify encoder velocity scales proportionally
  */
 function test_speedRamp(): void {
+    basic.showNumber(2)
     serial.writeLine("=== Test 2: Speed Ramp M1 ===")
     
-    let board = getBoard()
-    let speeds = [0, 500, 1000, 500, 0]
+    let speeds = [0, 100, 200, 300, 400, 500]
     
     for (let speed of speeds) {
         serial.writeLine("Setting M1 speed: " + speed)
         board.setAllSpeeds(speed, 0, 0, 0)
         
-        // Read encoder for 3 seconds
+        // Give motor time to reach target speed
+        basic.pause(3000)  // Increased settling time
+        
+        // Read encoder velocity for 3 seconds
         for (let i = 0; i < 3; i++) {
             basic.pause(1000)
             let encoder = board.channel(ChannelNum.M1).readRealtimeEncoder()
-            serial.writeLine("  Realtime encoder: " + encoder)
+            serial.writeLine("  Velocity (counts/10ms): " + encoder)
         }
     }
     
@@ -104,9 +116,8 @@ function test_speedRamp(): void {
  * Test 3: Read accumulated encoders
  */
 function test_accumulatedEncoders(): void {
+    basic.showNumber(3)
     serial.writeLine("=== Test 3: Accumulated Encoders ===")
-    
-    let board = getBoard()
     
     // Run motor at moderate speed for 5 seconds
     serial.writeLine("Running M1 at speed 500 for 5s...")
@@ -125,16 +136,10 @@ function test_accumulatedEncoders(): void {
  * Test 4: All motors sequence
  */
 function test_allMotors(): void {
+    basic.showNumber(4)
     serial.writeLine("=== Test 4: All Motors Test ===")
     
-    let board = getBoard()
-    
-    // Initialize all motors as 310 type
-    serial.writeLine("Initializing all motors...")
-    for (let i = 1; i <= 4; i++) {
-        board.channel(i as ChannelNum).setMotorType(MotorType.Motor310)
-        basic.pause(500)
-    }
+    serial.writeLine("Testing all motors (configured as 310)...")
     
     // Test each motor individually
     for (let i = 1; i <= 4; i++) {
@@ -164,9 +169,8 @@ function test_allMotors(): void {
  * Test 5: PWM control (for motors without encoder)
  */
 function test_pwmControl(): void {
+    basic.showNumber(5)
     serial.writeLine("=== Test 5: PWM Control ===")
-    
-    let board = getBoard()
     
     serial.writeLine("Running PWM ramp on M1...")
     let pwmValues = [0, 2000, 4000, 6000, 8000, 6000, 4000, 2000, 0]
@@ -185,9 +189,8 @@ function test_pwmControl(): void {
  * Test 6: Read all encoders simultaneously
  */
 function test_readAllEncoders(): void {
+    basic.showNumber(6)
     serial.writeLine("=== Test 6: Read All Encoders ===")
-    
-    let board = getBoard()
     
     // Run all motors at same speed
     serial.writeLine("Running all motors at 400...")
@@ -244,11 +247,22 @@ input.onButtonPressed(Button.A, function () {
     serial.writeLine("====================================")
     serial.writeLine("All tests complete!")
     serial.writeLine("====================================")
+    
+    basic.showIcon(IconNames.Happy)
 })
 
 input.onButtonPressed(Button.B, function () {
     serial.writeLine("Emergency stop - all motors off")
-    getBoard().stopAll()
+    basic.showIcon(IconNames.Skull)
+    // Send stop command multiple times to ensure it takes effect
+    for (let i = 0; i < 3; i++) {
+        board.setAllSpeeds(0, 0, 0, 0)
+        board.setAllPWM(0, 0, 0, 0)
+        basic.pause(100)
+    }
+    serial.writeLine("Motors stopped")
+    basic.pause(1000)
+    basic.showIcon(IconNames.Heart)
 })
 
 // Start checking I2C connection immediately on boot

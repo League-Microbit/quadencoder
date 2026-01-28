@@ -7,4 +7,4 @@ deploy:
 	pxt deploy
 
 test: 
-	pxt build && pxt test
+	pxt build && pxt deploy && pxt test
